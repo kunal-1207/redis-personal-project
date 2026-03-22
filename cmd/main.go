@@ -6,13 +6,17 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
 // KeyValueStore represents an in-memory key-value store with expiration support
 type KeyValueStore struct {
+	mu   sync.RWMutex
 	data map[string]ValueEntry
 }
 
@@ -31,6 +35,8 @@ func NewKeyValueStore() *KeyValueStore {
 
 // Set stores a key-value pair with optional expiration
 func (kv *KeyValueStore) Set(key, value string, expiry *time.Time) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	kv.data[key] = ValueEntry{
 		Value:      value,
 		Expiration: expiry,
@@ -39,14 +45,22 @@ func (kv *KeyValueStore) Set(key, value string, expiry *time.Time) {
 
 // Get retrieves a value by key, returning the value and whether it exists and hasn't expired
 func (kv *KeyValueStore) Get(key string) (string, bool) {
+	kv.mu.RLock()
 	entry, exists := kv.data[key]
+	kv.mu.RUnlock()
+
 	if !exists {
 		return "", false
 	}
 
 	// Check if the entry has expired
 	if entry.Expiration != nil && time.Now().After(*entry.Expiration) {
-		delete(kv.data, key)
+		kv.mu.Lock()
+		// Double check exists after acquiring write lock
+		if entry, exists = kv.data[key]; exists && entry.Expiration != nil && time.Now().After(*entry.Expiration) {
+			delete(kv.data, key)
+		}
+		kv.mu.Unlock()
 		return "", false
 	}
 
@@ -61,6 +75,8 @@ func (kv *KeyValueStore) Exists(key string) bool {
 
 // Delete removes a key from the store
 func (kv *KeyValueStore) Delete(key string) int {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	_, exists := kv.data[key]
 	if exists {
 		delete(kv.data, key)
@@ -71,6 +87,8 @@ func (kv *KeyValueStore) Delete(key string) int {
 
 // Expire sets an expiration time for a key
 func (kv *KeyValueStore) Expire(key string, seconds int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	entry, exists := kv.data[key]
 	if !exists {
 		return false
@@ -82,8 +100,39 @@ func (kv *KeyValueStore) Expire(key string, seconds int) bool {
 	return true
 }
 
+// EvictExpiredKeys removes all expired keys from the store
+func (kv *KeyValueStore) EvictExpiredKeys() int {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	
+	count := 0
+	now := time.Now()
+	for key, entry := range kv.data {
+		if entry.Expiration != nil && now.After(*entry.Expiration) {
+			delete(kv.data, key)
+			count++
+		}
+	}
+	return count
+}
+
+// DBSize returns the number of keys in the store
+func (kv *KeyValueStore) DBSize() int {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+	return len(kv.data)
+}
+
 func main() {
-	fmt.Println("Starting Redis-compatible server on port 6379...")
+	fmt.Println(`
+  _____           _ _         ____                                    _ 
+ |  __ \         | (_)       / __ \                                  | |
+ | |__) |___  __| |_ ___   | |  | |_   _____ _ __ ___  __ _ _ __   __| |
+ |  _  // _ \/ _` + "`" + ` | / __|  | |  | \ \ / / _ \ '__/ __|/ _` + "`" + ` | '_ \ / _` + "`" + ` |
+ | | \ \  __/ (_| | \__ \  | |__| |\ V /  __/ |  \__ \ (_| | | | | (_| |
+ |_|  \_\___|\__,_|_|___/   \____/  \_/ \___|_|  |___/\__,_|_| |_|\__,_|
+                                                                        
+ Redis-compatible server (v0.1.0) starting...`)
 	
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
@@ -97,16 +146,44 @@ func main() {
 	// In-memory storage for key-value pairs
 	store := NewKeyValueStore()
 
-	// Accept connections
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
-			continue
+	// Start background eviction
+	go startEviction(store)
+
+	// Channel to listen for interrupt signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Accept connections in a goroutine
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				select {
+				case <-sigChan:
+					return // listener closed
+				default:
+					fmt.Println("Error accepting connection: ", err.Error())
+					continue
+				}
+			}
+			
+			// Handle each connection
+			go handleConnection(conn, store)
 		}
-		
-		// Handle each connection
-		go handleConnection(conn, store)
+	}()
+
+	// Wait for termination signal
+	sig := <-sigChan
+	fmt.Printf("\nReceived signal: %s. Shutting down server...\n", sig)
+}
+
+func startEviction(store *KeyValueStore) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	for range ticker.C {
+		count := store.EvictExpiredKeys()
+		if count > 0 {
+			fmt.Printf("Background Eviction: Removed %d expired keys\n", count)
+		}
 	}
 }
 
@@ -338,6 +415,36 @@ func executeCommand(conn net.Conn, args []string, store *KeyValueStore) {
 		} else {
 			conn.Write([]byte("-ERR wrong number of arguments for 'incr' command\r\n"))
 		}
+	case "MGET":
+		if len(args) >= 2 {
+			conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(args)-1)))
+			for i := 1; i < len(args); i++ {
+				if value, exists := store.Get(args[i]); exists {
+					conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)))
+				} else {
+					conn.Write([]byte("$-1\r\n"))
+				}
+			}
+		} else {
+			conn.Write([]byte("-ERR wrong number of arguments for 'mget' command\r\n"))
+		}
+	case "MSET":
+		if len(args) >= 3 && (len(args)-1)%2 == 0 {
+			for i := 1; i < len(args); i += 2 {
+				store.Set(args[i], args[i+1], nil)
+			}
+			conn.Write([]byte("+OK\r\n"))
+		} else {
+			conn.Write([]byte("-ERR wrong number of arguments for 'mset' command\r\n"))
+		}
+	case "DBSIZE":
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", store.DBSize())))
+	case "COMMAND":
+		// Minimal implementation for redis-cli
+		conn.Write([]byte("*0\r\n"))
+	case "INFO":
+		info := "# Server\r\nredis_version:0.1.0\r\nos:windows\r\n# Stats\r\ntotal_keys:" + strconv.Itoa(store.DBSize()) + "\r\n"
+		conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(info), info)))
 	default:
 		conn.Write([]byte(fmt.Sprintf("-ERR unknown command '%s'\r\n", command)))
 	}
