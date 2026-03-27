@@ -5,21 +5,56 @@ A high-performance, concurrent, Redis-compatible in-memory key-value store built
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-1.22%2B-blue)
 
+---
+
 ## 🚀 Overview
 
-Personal-Redis is a lightweight implementation of the Redis Serialization Protocol (RESP) and a thread-safe in-memory storage engine. It features active background eviction for expired keys, graceful shutdown support, and a growing list of supported Redis commands.
+**Personal-Redis** is a lightweight yet robust implementation of the Redis Serialization Protocol (RESP), designed to emulate core Redis behavior with a focus on concurrency, correctness, and system-level reliability.
 
-### Key Features
+This project demonstrates backend systems design principles such as:
 
-- **Concurrent Access**: Thread-safe storage engine using `sync.RWMutex`.
-- **Automatic Eviction**: Background goroutine actively removes expired keys.
-- **RESP Compliant**: Supports standard Redis clients like `redis-cli`.
-- **Graceful Shutdown**: Handles OS signals (SIGINT, SIGTERM) to shut down cleanly.
-- **Production Ready**: Includes unit tests, structured logging, and robust error handling.
+* Concurrent request handling
+* Memory-efficient data structures
+* Background task orchestration
+* Graceful process lifecycle management
+
+It is fully compatible with standard Redis clients like `redis-cli`.
+
+---
+
+## ✨ Key Features
+
+* **Concurrent Access**
+
+  * Thread-safe in-memory store using `sync.RWMutex`
+  * Optimized for high read/write throughput
+
+* **Active Key Expiration**
+
+  * Background eviction worker removes expired keys proactively
+  * Prevents memory bloat and stale data accumulation
+
+* **RESP Protocol Support**
+
+  * Fully compatible with Redis clients (`redis-cli`)
+  * Custom RESP parser and command dispatcher
+
+* **Graceful Shutdown**
+
+  * Handles `SIGINT` and `SIGTERM`
+  * Ensures clean resource deallocation and connection closure
+
+* **Production-Oriented Design**
+
+  * Structured logging
+  * Unit testing coverage
+  * Defensive error handling
+
+---
 
 ## 🏗️ Architecture
 
-The following diagram illustrates the internal working of the application:
+The following diagram illustrates the internal architecture and request lifecycle:
 
 ```mermaid
 graph TD
@@ -33,7 +68,7 @@ graph TD
         
         subgraph "Storage Engine"
             Store -->|Mutex Protected| Data[(In-Memory Map)]
-            Data -->|Expiration Check| Get[Get Request]
+            Data -->|Expiration Check| Get[Get Request Path]
         end
         
         Evictor[Background Eviction Goroutine] -.->|Periodic Cleanup| Data
@@ -42,20 +77,36 @@ graph TD
     Signal[OS Signal Handler] -.->|Shutdown| Listener
 ```
 
-## 🛠️ Commands Supported
+### 🔍 Flow Explanation
 
-| Category | Commands |
-| --- | --- |
-| **Connection** | `PING`, `ECHO`, `QUIT` |
-| **Generic** | `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `DBSIZE`, `INFO` |
-| **Strings** | `INCR`, `MGET`, `MSET` |
-| **System** | `COMMAND` (minimal) |
+1. Client sends a request using RESP
+2. TCP Listener accepts incoming connections
+3. Each connection is handled concurrently
+4. RESP Parser decodes the request
+5. Command Executor processes logic
+6. Data is read/written from the thread-safe store
+7. Background goroutine continuously cleans expired keys
+
+---
+
+## 🛠️ Supported Commands
+
+| Category       | Commands                                                  |
+| -------------- | --------------------------------------------------------- |
+| **Connection** | `PING`, `ECHO`, `QUIT`                                    |
+| **Generic**    | `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `DBSIZE`, `INFO` |
+| **Strings**    | `INCR`, `MGET`, `MSET`                                    |
+| **System**     | `COMMAND` (minimal implementation)                        |
+
+---
 
 ## 📦 Getting Started
 
 ### Prerequisites
 
-- [Go](https://golang.org/doc/install) 1.22 or higher.
+* Go **1.22+**
+
+---
 
 ### Installation
 
@@ -64,11 +115,21 @@ git clone https://github.com/kunal-1207/redis-personal-project.git
 cd redis-personal-project
 ```
 
+---
+
 ### Running the Server
 
 ```bash
 go run cmd/main.go
 ```
+
+The server starts on:
+
+```
+localhost:6379
+```
+
+---
 
 ### Running Tests
 
@@ -76,21 +137,25 @@ go run cmd/main.go
 go test -v ./cmd/...
 ```
 
+---
+
 ## 🖥️ Usage
 
-Connect to the server using `redis-cli`:
+Connect using `redis-cli`:
 
 ```bash
-# Basic operations
+# Health check
 redis-cli PING
+
+# Basic key-value operations
 redis-cli SET user:1 "Kunal"
 redis-cli GET user:1
 
-# Operations with expiration
-redis-cli SET temporary "value" EX 10
+# Expiration
+redis-cli SET temp "value" EX 10
 redis-cli EXPIRE user:1 60
 
-# Atomic increment
+# Atomic operations
 redis-cli SET counter 10
 redis-cli INCR counter
 
@@ -99,6 +164,26 @@ redis-cli MSET a 1 b 2 c 3
 redis-cli MGET a b c
 ```
 
+---
+
+## 📈 Future Improvements (Optional but strong for SRE angle)
+
+If you want this to stand out for SRE/DevOps roles, add:
+
+* Persistence (AOF / RDB-like snapshots)
+* LRU/LFU eviction policies
+* Metrics endpoint (Prometheus)
+* Benchmarking suite
+* Connection pooling
+* Docker + Kubernetes deployment
+* Load testing with tools like `k6`
+
+---
+
 ## 🛡️ License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+
